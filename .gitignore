@@ -1,0 +1,38 @@
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Production build artifacts
+dist/
+tmp/
+out/
+build/
+
+# Local temporary upload & output stores
+uploads/
+outputs/
+*.zip
+
+# Face detection neural networks (dynamically fetched on setup)
+public/models/
+
+# Environmental configurations & secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
