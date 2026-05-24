@@ -3,22 +3,19 @@ import {
   FolderPlus, 
   Files, 
   Trash2, 
-  Sparkles, 
   CheckCircle, 
   RefreshCw, 
   Download, 
   AlertCircle,
-  HelpCircle,
   Clock,
-  Archive
+  Archive,
+  Play
 } from 'lucide-react';
-import { detectFacesInImage } from '../utils/faceDetector';
 
-export default function BatchProcessor({ globalOptions }) {
+export default function BatchProcessor({ selectedTasks, cropOptions, resizeOptions }) {
   const [queue, setQueue] = useState([]);
   const [processing, setProcessing] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
-  const [processedCount, setProcessedCount] = useState(0);
   const [error, setError] = useState(null);
 
   // Add multiple files to the batch queue
@@ -29,8 +26,7 @@ export default function BatchProcessor({ globalOptions }) {
       file,
       name: file.name,
       size: (file.size / 1024).toFixed(1) + ' KB',
-      status: 'queued', // 'queued', 'scanning', 'ready', 'failed'
-      faces: []
+      status: 'queued' // 'queued', 'processing', 'completed', 'failed'
     }));
     setQueue(prev => [...prev, ...newFiles]);
     setError(null);
@@ -45,157 +41,79 @@ export default function BatchProcessor({ globalOptions }) {
     setError(null);
   };
 
-  // Perform client-side face recognition on all queued images
-  const analyzeBatch = async () => {
+  // Compile batch files, upload to FastAPI server, process, and stream ZIP
+  const processAndDownloadBatch = async () => {
     if (queue.length === 0) return;
-    setProcessing(true);
-    setProgressMsg('Initializing local AI models...');
-    setProcessedCount(0);
-    setError(null);
-
-    const updatedQueue = [...queue];
-
-    try {
-      for (let i = 0; i < updatedQueue.length; i++) {
-        const item = updatedQueue[i];
-        if (item.status === 'ready') {
-          setProcessedCount(c => c + 1);
-          continue;
-        }
-
-        setProgressMsg(`AI Scanning: ${item.name} (${i + 1}/${updatedQueue.length})`);
-        
-        // Mark item as scanning
-        setQueue(prev => prev.map(f => f.id === item.id ? { ...f, status: 'scanning' } : f));
-
-        try {
-          // Load file into an image element asynchronously
-          const img = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = (e) => {
-              const el = new Image();
-              el.src = e.target.result;
-              el.onload = () => resolve(el);
-              el.onerror = (err) => reject(err);
-            };
-            reader.readAsDataURL(item.file);
-          });
-
-          // Perform face detection
-          const detections = await detectFacesInImage(img, { detectorType: 'tiny', scoreThreshold: 0.4 });
-          const relativeFaces = detections.map(d => d.relativeBox);
-
-          // Update item state with faces array
-          setQueue(prev => prev.map(f => f.id === item.id ? { 
-            ...f, 
-            status: 'ready', 
-            faces: relativeFaces 
-          } : f));
-          
-          updatedQueue[i].status = 'ready';
-          updatedQueue[i].faces = relativeFaces;
-
-        } catch (itemErr) {
-          console.error(`Failed to scan image ${item.name}:`, itemErr);
-          setQueue(prev => prev.map(f => f.id === item.id ? { ...f, status: 'failed' } : f));
-          updatedQueue[i].status = 'failed';
-        }
-
-        setProcessedCount(i + 1);
-      }
-
-      setProgressMsg('Face analysis completed!');
-    } catch (err) {
-      setError('An error occurred during image face recognition: ' + err.message);
-    } finally {
-      setProcessing(false);
-    }
-  };
-
-  // Compile batch files, upload to server, apply crops, and download ZIP archive
-  const processAndDownload = async () => {
-    const readyItems = queue.filter(item => item.status === 'ready');
-    if (readyItems.length === 0) {
-      setError('Please analyze the images first using the "Run AI Face Scan" button.');
+    if (selectedTasks.length === 0) {
+      setError('Please select at least one AI task in the sidebar (Face, Body, Smart Crop, or Resize).');
       return;
     }
 
     setProcessing(true);
-    setProgressMsg('Uploading batch images to server...');
+    setProgressMsg('Uploading batch images to FastAPI server...');
     setError(null);
 
+    // Update all files to processing status
+    setQueue(prev => prev.map(f => ({ ...f, status: 'processing' })));
+
     try {
-      // 1. Upload files via Express backend multipart upload
       const formData = new FormData();
-      readyItems.forEach(item => {
+      queue.forEach(item => {
         formData.append('images', item.file);
       });
 
-      const uploadResponse = await fetch('/api/upload', {
+      // Prepare configuration JSON
+      const configObj = {
+        tasks: selectedTasks,
+        cropOptions,
+        resizeOptions
+      };
+      formData.append('config', JSON.stringify(configObj));
+
+      setProgressMsg('FastAPI executing live YOLOv8 & OpenCV pipelines...');
+      
+      const response = await fetch('http://localhost:5000/api/batch-process', {
         method: 'POST',
         body: formData
       });
 
-      if (!uploadResponse.ok) {
-        throw new Error('Server upload failed. Make sure backend is running.');
+      if (!response.ok) {
+        throw new Error('Batch processing failed on server. Make sure FastAPI backend is active.');
       }
 
-      const uploadResult = await uploadResponse.json();
-      setProgressMsg('Server running intelligent Sharp cropping algorithms...');
-
-      // 2. Map files to uploaded filenames and crop coordinates
-      const batchItems = readyItems.map((item, idx) => {
-        const uploadedFile = uploadResult.files[idx];
-        return {
-          filename: uploadedFile.id,
-          faces: item.faces,
-          options: {} // can override per image options in future
-        };
-      });
-
-      // 3. Trigger Express to run sharp crop and zip the files
-      const cropResponse = await fetch('/api/batch-crop', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          batchItems,
-          globalOptions
-        })
-      });
-
-      if (!cropResponse.ok) {
-        throw new Error('Batch processing or cropping failed on server.');
-      }
-
-      // 4. Download output zip file
-      setProgressMsg('Downloading smartcropped zip package...');
-      const blob = await cropResponse.blob();
+      // Download output zip file
+      setProgressMsg('Assembling and downloading ZIP archive...');
+      const blob = await response.blob();
       const downloadUrl = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = downloadUrl;
-      link.setAttribute('download', `smartcrop-batch-${Date.now()}.zip`);
+      link.setAttribute('download', `smartcrop_yolov8_batch_${Date.now()}.zip`);
       document.body.appendChild(link);
       link.click();
       link.remove();
       window.URL.revokeObjectURL(downloadUrl);
 
-      setProgressMsg('Zip package downloaded successfully!');
+      setProgressMsg('Batch zip file downloaded successfully!');
       
-      // Clear queue on success
-      setQueue([]);
+      // Update queue to completed status
+      setQueue(prev => prev.map(f => ({ ...f, status: 'completed' })));
+      
+      // Auto clear queue after 3 seconds on success
+      setTimeout(() => {
+        setQueue([]);
+        setProgressMsg('');
+      }, 3000);
+
     } catch (err) {
-      console.error('Batch crop download failed:', err);
+      console.error('Batch process failed:', err);
       setError('Batch processing failed: ' + err.message);
+      setQueue(prev => prev.map(f => ({ ...f, status: 'failed' })));
     } finally {
       setProcessing(false);
     }
   };
 
-  const anyScanning = queue.some(f => f.status === 'scanning');
-  const allReady = queue.length > 0 && queue.every(f => f.status === 'ready');
-  const hasReadyFiles = queue.some(f => f.status === 'ready');
+  const hasFiles = queue.length > 0;
 
   return (
     <div className="mx-auto max-w-5xl rounded-3xl border border-dark-cardBorder/60 bg-dark-card/30 backdrop-blur-xl p-8 shadow-2xl">
@@ -205,15 +123,15 @@ export default function BatchProcessor({ globalOptions }) {
       <div className="mb-8 border-b border-dark-cardBorder/50 pb-6 flex items-center justify-between">
         <div>
           <h3 className="text-xl font-bold text-white tracking-wide font-sans flex items-center space-x-2">
-            <Files className="h-5.5 w-5.5 text-brand-400" />
-            <span>Batch Auto-Framing Portal</span>
+            <Archive className="h-5.5 w-5.5 text-brand-400" />
+            <span>YOLOv8 Batch Auto-Framing Portal</span>
           </h3>
           <p className="text-xs text-slate-400 mt-1 max-w-lg">
-            Upload multiple photos, let the client-side browser AI locate all faces, and instantly download a compiled ZIP archive containing perfectly cropped versions.
+            Upload multiple photos, let the backend YOLOv8 models scan and process all items in parallel, and instantly receive a zipped package of cropped faces/bodies, smart crops, or resized frames.
           </p>
         </div>
 
-        {queue.length > 0 && (
+        {hasFiles && (
           <button
             onClick={clearQueue}
             disabled={processing}
@@ -230,7 +148,7 @@ export default function BatchProcessor({ globalOptions }) {
         
         {/* Left pane: File drag drop and actions */}
         <div className="lg:col-span-1 flex flex-col space-y-6">
-          <div className="relative group flex min-h-[200px] w-full flex-col items-center justify-center rounded-2xl border-2 border-dashed border-dark-cardBorder bg-slate-900/10 text-center transition-all duration-300 hover:border-slate-700 hover:bg-slate-900/30">
+          <div className="relative group flex min-h-[220px] w-full flex-col items-center justify-center rounded-3xl border-2 border-dashed border-dark-cardBorder bg-slate-900/10 text-center transition-all duration-300 hover:border-slate-700 hover:bg-slate-900/30">
             <input
               type="file"
               multiple
@@ -240,53 +158,40 @@ export default function BatchProcessor({ globalOptions }) {
               accept=".jpg,.jpeg,.png,.webp"
             />
             <div className="flex flex-col items-center p-6 pointer-events-none">
-              <FolderPlus className="h-9 w-9 text-slate-500 mb-3 group-hover:text-brand-400 transition-colors" />
+              <FolderPlus className="h-10 w-10 text-slate-500 mb-3 group-hover:text-brand-400 transition-colors" />
               <span className="text-xs font-bold text-slate-300">Add Batch Images</span>
-              <span className="text-[10px] text-slate-500 mt-1">Supports PNG, JPG, WEBP</span>
+              <span className="text-[10px] text-slate-500 mt-1.5">Supports PNG, JPG, WEBP</span>
             </div>
           </div>
 
           <div className="space-y-3">
-            {/* Action 1: Client Face Recognition */}
+            {/* Unified Process & Download Button */}
             <button
-              onClick={analyzeBatch}
-              disabled={queue.length === 0 || processing || allReady}
-              className="flex w-full items-center justify-center space-x-2.5 rounded-2xl bg-gradient-to-tr from-brand-600 to-indigo-500 py-3.5 text-xs font-bold text-white shadow-glow-primary transition-all duration-300 hover:opacity-95 hover:scale-[1.01] disabled:opacity-30 disabled:pointer-events-none"
+              onClick={processAndDownloadBatch}
+              disabled={queue.length === 0 || processing || selectedTasks.length === 0}
+              className="flex w-full items-center justify-center space-x-2.5 rounded-2xl bg-gradient-to-tr from-brand-600 to-indigo-500 py-4 text-xs font-bold text-white shadow-glow-primary transition-all duration-300 hover:opacity-95 hover:scale-[1.01] disabled:opacity-30 disabled:pointer-events-none"
             >
-              <Sparkles className="h-4 w-4" />
-              <span>Run AI Face Scan</span>
-            </button>
-
-            {/* Action 2: Batch Crop & Zip Download */}
-            <button
-              onClick={processAndDownload}
-              disabled={!hasReadyFiles || processing}
-              className="flex w-full items-center justify-center space-x-2.5 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 py-3.5 text-xs font-bold text-emerald-400 transition-all duration-300 hover:bg-emerald-500/20 hover:scale-[1.01] disabled:opacity-30 disabled:pointer-events-none"
-            >
-              <Archive className="h-4 w-4" />
-              <span>Generate & Download ZIP</span>
+              <Play className="h-4 w-4 fill-white" />
+              <span>{processing ? 'Processing AI...' : 'Process Batch & Download ZIP'}</span>
             </button>
           </div>
 
           {/* Status logs */}
           {processing && (
-            <div className="rounded-2xl border border-dark-cardBorder bg-slate-900/40 p-4 space-y-3">
+            <div className="rounded-2xl border border-dark-cardBorder bg-slate-900/40 p-4 space-y-3 animate-fade-in">
               <div className="flex items-center space-x-2.5">
                 <RefreshCw className="h-4 w-4 text-brand-400 animate-spin" />
-                <span className="text-xs font-bold text-white">{progressMsg}</span>
+                <span className="text-xs font-bold text-white leading-tight">{progressMsg}</span>
               </div>
               <div className="w-full h-1 bg-slate-800 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-gradient-to-r from-brand-500 to-indigo-500 transition-all duration-300"
-                  style={{ width: `${(processedCount / queue.length) * 100}%` }}
-                ></div>
+                <div className="h-full bg-gradient-to-r from-brand-500 to-indigo-500 animate-pulse w-full"></div>
               </div>
-              <span className="text-[10px] text-slate-500 block">Processed: {processedCount} / {queue.length} files</span>
+              <span className="text-[10px] text-slate-500 block">FastAPI is processing all queued files concurrently...</span>
             </div>
           )}
 
           {error && (
-            <div className="flex items-start space-x-2 rounded-2xl border border-red-500/20 bg-red-500/10 p-4 text-xs text-red-400">
+            <div className="flex items-start space-x-2 rounded-2xl border border-red-500/20 bg-red-500/10 p-4 text-xs text-red-400 animate-fade-in">
               <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
               <span>{error}</span>
             </div>
@@ -297,7 +202,7 @@ export default function BatchProcessor({ globalOptions }) {
         <div className="lg:col-span-2 flex flex-col space-y-4">
           <span className="text-xs font-bold uppercase tracking-widest text-slate-400">Queue List ({queue.length} items)</span>
           
-          <div className="border border-dark-cardBorder/60 rounded-2xl bg-slate-950/40 min-h-[300px] max-h-[420px] overflow-y-auto p-4 space-y-2">
+          <div className="border border-dark-cardBorder/60 rounded-3xl bg-slate-950/40 min-h-[300px] max-h-[420px] overflow-y-auto p-4 space-y-2">
             {queue.length === 0 ? (
               <div className="h-full min-h-[260px] flex flex-col items-center justify-center text-center text-slate-600">
                 <Files className="h-10 w-10 text-slate-700 mb-3" />
@@ -312,7 +217,7 @@ export default function BatchProcessor({ globalOptions }) {
                 >
                   <div className="flex items-center space-x-3 truncate">
                     <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-900 border border-dark-cardBorder text-slate-500">
-                      <ImageIcon className="h-4 w-4" />
+                      <Archive className="h-4 w-4" />
                     </div>
                     <div className="truncate flex flex-col text-left">
                       <span className="text-xs font-semibold text-slate-200 truncate max-w-[200px]">{item.name}</span>
@@ -321,7 +226,7 @@ export default function BatchProcessor({ globalOptions }) {
                   </div>
 
                   <div className="flex items-center space-x-4">
-                    {/* Status node */}
+                    {/* Status badges */}
                     {item.status === 'queued' && (
                       <span className="flex items-center space-x-1 text-[10px] font-semibold text-slate-500 bg-slate-900 px-2 py-0.5 rounded-full border border-dark-cardBorder">
                         <Clock className="h-3 w-3" />
@@ -329,17 +234,17 @@ export default function BatchProcessor({ globalOptions }) {
                       </span>
                     )}
 
-                    {item.status === 'scanning' && (
+                    {item.status === 'processing' && (
                       <span className="flex items-center space-x-1 text-[10px] font-semibold text-brand-400 bg-brand-500/10 px-2 py-0.5 rounded-full border border-brand-500/20">
                         <RefreshCw className="h-3 w-3 animate-spin" />
-                        <span>Scanning...</span>
+                        <span>Processing...</span>
                       </span>
                     )}
 
-                    {item.status === 'ready' && (
+                    {item.status === 'completed' && (
                       <span className="flex items-center space-x-1 text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
                         <CheckCircle className="h-3 w-3" />
-                        <span>Ready ({item.faces.length} faces)</span>
+                        <span>Done</span>
                       </span>
                     )}
 

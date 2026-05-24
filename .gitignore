@@ -36,3 +36,16 @@ desktop.ini
 *.njsproj
 *.sln
 *.sw?
+
+# Python environments & compilations
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# YOLOv8 Weights
+*.pt
+yolov8n.pt
+

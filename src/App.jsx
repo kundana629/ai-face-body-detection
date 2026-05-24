@@ -5,134 +5,164 @@ import PreviewWorkspace from './components/PreviewWorkspace';
 import ControlSidebar from './components/ControlSidebar';
 import BatchProcessor from './components/BatchProcessor';
 
-import { loadFaceDetectionModels, detectFacesInImage } from './utils/faceDetector';
-import { cropImageOnCanvas } from './utils/cropEngine';
-import { Sparkles, Files, Image as ImageIcon, Trash2, ArrowLeft } from 'lucide-react';
+import { Sparkles, Files, Image as ImageIcon, Trash2, ArrowLeft, AlertCircle } from 'lucide-react';
 
-const defaultOptions = {
+const defaultCropOptions = {
   targetRatio: 1.0,
-  padding: 0.5,
+  padding: 0.4,
   zoom: 1.0,
-  shiftX: 0,
-  shiftY: 0,
+  shiftX: 0.0,
+  shiftY: 0.0,
   blurBackground: true,
   blurStrength: 20
+};
+
+const defaultResizeOptions = {
+  mode: 'custom',
+  width: 512,
+  height: 512,
+  preserveAspect: true
 };
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('single'); // 'single' | 'batch'
   
-  // Single Editor States
+  // Selection / Options States
+  const [selectedTasks, setSelectedTasks] = useState(['face_detection', 'smart_crop']);
+  const [cropOptions, setCropOptions] = useState(defaultCropOptions);
+  const [resizeOptions, setResizeOptions] = useState(defaultResizeOptions);
+
+  // Single Editor File States
   const [file, setFile] = useState(null);
   const [imageSrc, setImageSrc] = useState(null);
-  const [imgElement, setImgElement] = useState(null);
-  const [faces, setFaces] = useState([]);
-  const [cropOptions, setCropOptions] = useState(defaultOptions);
-  const [croppedImageSrc, setCroppedImageSrc] = useState(null);
-  const [isDetecting, setIsDetecting] = useState(false);
-  const [detectionProgress, setDetectionProgress] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [error, setError] = useState(null);
 
-  // 1. Preload Face Detection models in the background on mount
-  useEffect(() => {
-    loadFaceDetectionModels((msg) => console.log('AI Preload:', msg)).catch(err => {
-      console.error('Failed to preload AI models:', err);
-    });
-  }, []);
+  // Processed Results from FastAPI
+  const [processedResults, setProcessedResults] = useState({
+    faces: [],
+    bodies: [],
+    visualizedImageSrc: null,
+    croppedImageSrc: null,
+    resizedImageSrc: null,
+    resizedDims: null
+  });
 
-  // 2. Handle file selection in single editor
+  // Handle file selection in single editor
   const handleFileSelect = (selectedFile) => {
     setFile(selectedFile);
     
     // Create local object URL for previewing
     const src = URL.createObjectURL(selectedFile);
     setImageSrc(src);
-    setFaces([]);
-    setCroppedImageSrc(null);
-    setCropOptions(defaultOptions);
-
-    // Create an offscreen HTML image element to read natural dimensions & run AI
-    const img = new Image();
-    img.src = src;
-    img.onload = () => {
-      setImgElement(img);
-      triggerFaceDetection(img);
-    };
-  };
-
-  // 3. Trigger face-api.js AI detection client-side
-  const triggerFaceDetection = async (imgEl) => {
-    setIsDetecting(true);
-    setDetectionProgress('Loading neural networks...');
+    setError(null);
     
-    try {
-      // Load models first if not done
-      await loadFaceDetectionModels((progress) => setDetectionProgress(progress));
-      
-      setDetectionProgress('Scanning coordinates for human faces...');
-      
-      // Perform detections (use tiny detector for high performance in dashboard)
-      const results = await detectFacesInImage(imgEl, { detectorType: 'tiny', scoreThreshold: 0.45 });
-      
-      setFaces(results);
-      setDetectionProgress(`Complete! Detected ${results.length} faces.`);
-      
-      // If no faces found, alert slightly but continue with center cropping fallback
-      if (results.length === 0) {
-        console.warn('No faces detected in image, falling back to center cropping.');
-      }
-    } catch (err) {
-      console.error('Face Detection Failed:', err);
-      setDetectionProgress('AI detection error. Check logs.');
-    } finally {
-      setIsDetecting(false);
-    }
+    // Reset previous outputs
+    setProcessedResults({
+      faces: [],
+      bodies: [],
+      visualizedImageSrc: null,
+      croppedImageSrc: null,
+      resizedImageSrc: null,
+      resizedDims: null
+    });
   };
 
-  // 4. Update the Canvas Crop in real-time when faces, parameters, or image element updates
+  // Automatically trigger processing when a new file is uploaded
   useEffect(() => {
-    if (imgElement) {
-      try {
-        // Map faces to relative boxes
-        const relativeBoxes = faces.map(f => f.relativeBox);
-        const dataUrl = cropImageOnCanvas(imgElement, relativeBoxes, cropOptions);
-        setCroppedImageSrc(dataUrl);
-      } catch (err) {
-        console.error('Cropping failure:', err);
-      }
+    if (file && imageSrc) {
+      triggerImageProcessing();
     }
-  }, [imgElement, faces, cropOptions]);
+  }, [file]);
 
-  // 5. Trigger Single Cropped Image Download
-  const handleDownload = () => {
-    if (!croppedImageSrc || !file) return;
+  // Main single-image processing orchestrator using FastAPI backend
+  const triggerImageProcessing = async () => {
+    if (!file) return;
+    if (selectedTasks.length === 0) {
+      setError('Please select at least one AI task in the sidebar dashboard.');
+      return;
+    }
 
-    const link = document.createElement('a');
-    link.href = croppedImageSrc;
-    
-    // Get file name without extension
-    const baseName = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
-    link.download = `${baseName}-cropped-${Date.now()}.png`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+    setIsProcessing(true);
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('image', file);
+
+      // Package tasks, crop options, and resize options as a config JSON string
+      const configObj = {
+        tasks: selectedTasks,
+        cropOptions,
+        resizeOptions
+      };
+      formData.append('config', JSON.stringify(configObj));
+
+      // Make API call to FastAPI backend
+      const response = await fetch('http://localhost:5000/api/process', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!response.ok) {
+        throw new Error('API server processing failed. Ensure the FastAPI backend is running on port 5000.');
+      }
+
+      const data = await response.json();
+      
+      if (data.success) {
+        setProcessedResults({
+          faces: data.faces || [],
+          bodies: data.bodies || [],
+          visualizedImageSrc: data.visualized_image || null,
+          croppedImageSrc: data.smart_cropped_image || null,
+          resizedImageSrc: data.resized_image || null,
+          resizedDims: data.resized_dims || null
+        });
+      } else {
+        throw new Error(data.error || 'Unknown server processing error.');
+      }
+
+    } catch (err) {
+      console.error('FastAPI Connection Error:', err);
+      setError(err.message || 'Failed to connect to the FastAPI backend service.');
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
-  // 6. Reset parameters to defaults
+  // Toggle tasks in task dashboard
+  const handleToggleTask = (taskId) => {
+    setSelectedTasks(prev => 
+      prev.includes(taskId)
+        ? prev.filter(t => t !== taskId)
+        : [...prev, taskId]
+    );
+  };
+
+  // Reset parameters to defaults
   const handleReset = () => {
-    setCropOptions(defaultOptions);
+    setCropOptions(defaultCropOptions);
+    setResizeOptions(defaultResizeOptions);
+    setSelectedTasks(['face_detection', 'smart_crop']);
   };
 
-  // 7. Remove current image and return to upload screen
+  // Remove current image and return to upload screen
   const removeImage = () => {
     if (imageSrc) {
       URL.revokeObjectURL(imageSrc);
     }
     setFile(null);
     setImageSrc(null);
-    setImgElement(null);
-    setFaces([]);
-    setCroppedImageSrc(null);
-    setCropOptions(defaultOptions);
+    setError(null);
+    setProcessedResults({
+      faces: [],
+      bodies: [],
+      visualizedImageSrc: null,
+      croppedImageSrc: null,
+      resizedImageSrc: null,
+      resizedDims: null
+    });
   };
 
   return (
@@ -145,15 +175,15 @@ export default function App() {
         <div className="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="space-y-1">
             <h2 className="text-2xl font-bold tracking-tight text-white font-sans">
-              SmartCrop Workspace
+              YOLOv8 AI Workbench
             </h2>
             <p className="text-xs text-slate-400">
-              Intelligent social-media auto-cropping and face recognition framing workbench.
+              Intelligent multi-task object detection, face framing, and precision image scaling workbench.
             </p>
           </div>
 
           {/* Editor Mode Tabs Toggle */}
-          <div className="flex rounded-xl bg-slate-900 border border-dark-cardBorder/50 p-1 self-start sm:self-center">
+          <div className="flex rounded-xl bg-slate-900 border border-dark-cardBorder/50 p-1 self-start sm:self-center shadow-lg">
             <button
               onClick={() => setActiveTab('single')}
               className={`flex items-center space-x-2 rounded-lg px-4 py-2 text-xs font-bold transition-all duration-200 ${
@@ -211,6 +241,18 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Error alert banner */}
+                {error && (
+                  <div className="flex items-start space-x-2.5 rounded-2xl border border-red-500/20 bg-red-500/10 p-4 text-xs text-red-400 animate-fade-in">
+                    <AlertCircle className="h-4.5 w-4.5 shrink-0 mt-0.5" />
+                    <div className="text-left">
+                      <p className="font-bold">FastAPI Connection Failure</p>
+                      <p className="mt-1 text-slate-400">Please verify that the Python backend is running locally by executing <code className="bg-slate-950 px-1.5 py-0.5 rounded text-[10px]">python backend/run.py</code> in your terminal.</p>
+                      <p className="mt-1 font-mono text-[10px] text-red-300">Details: {error}</p>
+                    </div>
+                  </div>
+                )}
+
                 {/* Comparative Workspace Grid */}
                 <div className="grid grid-cols-1 xl:grid-cols-4 gap-8 items-start">
                   
@@ -218,24 +260,32 @@ export default function App() {
                   <div className="xl:col-span-3">
                     <PreviewWorkspace
                       imageSrc={imageSrc}
-                      faces={faces}
+                      faces={processedResults.faces}
+                      bodies={processedResults.bodies}
                       cropOptions={cropOptions}
-                      croppedImageSrc={croppedImageSrc}
-                      isDetecting={isDetecting}
-                      detectionProgress={detectionProgress}
+                      croppedImageSrc={processedResults.croppedImageSrc}
+                      visualizedImageSrc={processedResults.visualizedImageSrc}
+                      resizedImageSrc={processedResults.resizedImageSrc}
+                      resizedDims={processedResults.resizedDims}
+                      isProcessing={isProcessing}
+                      selectedTasks={selectedTasks}
                     />
                   </div>
 
                   {/* Right Control Sidebar */}
                   <div className="xl:col-span-1">
                     <ControlSidebar
-                      options={cropOptions}
-                      onChange={setFile ? setCropOptions : () => {}}
-                      onDownload={handleDownload}
+                      selectedTasks={selectedTasks}
+                      onToggleTask={handleToggleTask}
+                      cropOptions={cropOptions}
+                      onChangeCrop={setCropOptions}
+                      resizeOptions={resizeOptions}
+                      onChangeResize={setResizeOptions}
+                      onProcess={triggerImageProcessing}
                       onReset={handleReset}
                       hasImage={!!file}
-                      isDetecting={isDetecting}
-                      hasFaces={faces.length > 0}
+                      isProcessing={isProcessing}
+                      hasResults={!!processedResults.visualizedImageSrc || !!processedResults.croppedImageSrc || !!processedResults.resizedImageSrc}
                     />
                   </div>
                 </div>
@@ -245,7 +295,11 @@ export default function App() {
         ) : (
           /* Batch Framing Tab */
           <div className="animate-fade-in py-2">
-            <BatchProcessor globalOptions={cropOptions} />
+            <BatchProcessor 
+              selectedTasks={selectedTasks}
+              cropOptions={cropOptions}
+              resizeOptions={resizeOptions}
+            />
           </div>
         )}
       </main>
@@ -253,8 +307,8 @@ export default function App() {
       {/* Decorative premium footer */}
       <footer className="w-full border-t border-dark-cardBorder/40 bg-dark-obsidian py-6 mt-16 text-center text-slate-500 text-[11px] font-medium tracking-wide">
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row sm:justify-between items-center gap-2">
-          <span>&copy; {new Date().getFullYear()} SmartCrop AI Framing Inc. All rights reserved.</span>
-          <span>Crafted with Deep Learning & WebGL Canvas Pipelines.</span>
+          <span>&copy; {new Date().getFullYear()} Intelligent YOLOv8 Object Detection Workspace. All rights reserved.</span>
+          <span>Powered by FastAPI, PyTorch, Ultralytics and OpenCV.</span>
         </div>
       </footer>
     </div>
