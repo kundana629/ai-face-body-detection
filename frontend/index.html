@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>AI Detection App</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+  <h1>YOLO AI Detection</h1>
+
+  <div class="container">
+
+    <!-- Image Upload -->
+    <input type="file" id="fileInput" accept="image/*">
+
+    <br><br>
+
+    <!-- Trigger detection -->
+    <button onclick="upload()">Detect Image</button>
+
+    <h3>Result:</h3>
+
+    <!-- Output image -->
+    <img id="result" width="400">
+
+  </div>
+
+  <!-- JS file (IMPORTANT: must match your actual file name) -->
+  <script src="app.js"></script>
+
+</body>
+</html>
